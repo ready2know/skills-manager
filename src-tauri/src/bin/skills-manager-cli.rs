@@ -3,7 +3,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow, bail};
-use app_lib::commands::{presets as preset_cmd, skills as cmd, tools as tool_cmd};
+use app_lib::commands::{
+    marketplaces as market_cmd, presets as preset_cmd, skills as cmd, tools as tool_cmd,
+};
 use app_lib::core::{
     app_state, audit_log::AuditDraft, central_repo, error::AppError, git_backup, git_fetcher,
     installer, merge, repo_lock::RepoLock, scenario_service, skill_metadata,
@@ -34,6 +36,10 @@ enum Commands {
     #[command(alias = "scenarios")]
     Presets(PresetArgs),
     Git(GitArgs),
+    /// Catalogs of skills to install from: a folder on this machine (e.g. a
+    /// clone you keep) or a repository, such as a Claude Code plugin marketplace.
+    #[command(alias = "marketplace")]
+    Marketplaces(MarketplaceArgs),
 }
 
 #[derive(Args, Debug)]
@@ -356,6 +362,65 @@ enum PresetCommand {
         preset: String,
         #[arg(required = true)]
         skills: Vec<String>,
+    },
+}
+
+#[derive(Args, Debug)]
+struct MarketplaceArgs {
+    #[command(subcommand)]
+    command: MarketplaceCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum MarketplaceCommand {
+    List,
+    /// Register marketplaces and scan them, one after another.
+    Add {
+        /// Folder paths, git URLs, owner/repo, or GitHub tree URLs
+        #[arg(required = true)]
+        locations: Vec<String>,
+        /// Only with a single location
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List a marketplace's plugins and skills, and which are installed.
+    Show {
+        /// Marketplace id or name
+        reference: String,
+    },
+    /// Re-read a folder marketplace, or fetch a repository one.
+    Refresh {
+        reference: String,
+    },
+    Rename {
+        reference: String,
+        name: String,
+    },
+    /// Forget a marketplace. Skills installed from it stay in the library.
+    Remove {
+        reference: String,
+    },
+    /// Add the marketplaces Claude Code has registered (~/.claude, or
+    /// $CLAUDE_CONFIG_DIR). Repositories get their own copy here.
+    ImportClaude {
+        /// Only these, by Claude Code's name. Default: every one not added yet.
+        names: Vec<String>,
+        /// Report what would be added without adding anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Install skills into the library (does NOT deploy them to any agent).
+    Install {
+        reference: String,
+        /// Skill names or paths, as `show` lists them
+        #[arg(required_unless_present = "all")]
+        skills: Vec<String>,
+        /// Every skill not yet installed
+        #[arg(long, conflicts_with = "skills")]
+        all: bool,
+        /// With --all: only this plugin's skills
+        #[arg(long, requires = "all")]
+        plugin: Option<String>,
     },
 }
 
@@ -739,6 +804,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Skills(args) => run_skills(args, &store, cli.json),
         Commands::Presets(args) => run_presets(args, &store, cli.json),
         Commands::Git(args) => run_git(args, &store, cli.skills_root.is_some(), cli.json),
+        Commands::Marketplaces(args) => run_marketplaces(args, &store, cli.json),
     }
 }
 
@@ -2080,6 +2146,254 @@ fn run_sync(
         dry_run: false,
         targets: filtered,
     })
+}
+
+// ── marketplaces ──────────────────────────────────────────────────────────
+
+fn run_marketplaces(args: MarketplaceArgs, store: &SkillStore, json: bool) -> anyhow::Result<()> {
+    let proxy_url = store.proxy_url();
+    match args.command {
+        MarketplaceCommand::List => {
+            print_json(&market_cmd::list_marketplaces_internal(store).map_err(map_app_err)?, json)
+        }
+        MarketplaceCommand::Add { locations, name } => {
+            if let [location] = locations.as_slice() {
+                let detail = market_cmd::add_marketplace_internal(
+                    store,
+                    location,
+                    name.as_deref(),
+                    proxy_url.as_deref(),
+                    None,
+                    None,
+                )
+                .map_err(map_app_err)?;
+                print_json(&detail, json);
+            } else {
+                if name.is_some() {
+                    bail!("--name applies to a single location; add the others without it");
+                }
+                print_json(&add_marketplaces(store, &locations, proxy_url.as_deref()), json);
+            }
+        }
+        MarketplaceCommand::Show { reference } => {
+            let id = market_cmd::resolve_marketplace_ref(store, &reference).map_err(map_app_err)?;
+            print_json(&market_cmd::get_marketplace_internal(store, &id).map_err(map_app_err)?, json);
+        }
+        MarketplaceCommand::Refresh { reference } => {
+            let id = market_cmd::resolve_marketplace_ref(store, &reference).map_err(map_app_err)?;
+            let detail = market_cmd::refresh_marketplace_internal(
+                store,
+                &id,
+                proxy_url.as_deref(),
+                None,
+                None,
+            )
+            .map_err(map_app_err)?;
+            print_json(&detail, json);
+        }
+        MarketplaceCommand::Rename { reference, name } => {
+            let id = market_cmd::resolve_marketplace_ref(store, &reference).map_err(map_app_err)?;
+            print_json(
+                &market_cmd::rename_marketplace_internal(store, &id, &name).map_err(map_app_err)?,
+                json,
+            );
+        }
+        MarketplaceCommand::Remove { reference } => {
+            let id = market_cmd::resolve_marketplace_ref(store, &reference).map_err(map_app_err)?;
+            market_cmd::remove_marketplace_internal(store, &id).map_err(map_app_err)?;
+            print_json(&serde_json::json!({ "removed": id }), json);
+        }
+        MarketplaceCommand::ImportClaude { names, dry_run } => {
+            let report = import_claude_marketplaces(store, &names, dry_run, proxy_url.as_deref())?;
+            print_json(&report, json);
+        }
+        MarketplaceCommand::Install {
+            reference,
+            skills,
+            all,
+            plugin,
+        } => {
+            let id = market_cmd::resolve_marketplace_ref(store, &reference).map_err(map_app_err)?;
+            let detail = market_cmd::get_marketplace_internal(store, &id).map_err(map_app_err)?;
+            let rel_paths = if all {
+                marketplace_install_all(&detail, plugin.as_deref())?
+            } else {
+                skills
+                    .iter()
+                    .map(|wanted| marketplace_skill_path(&detail, wanted))
+                    .collect::<anyhow::Result<Vec<_>>>()?
+            };
+            let result = market_cmd::install_marketplace_skills_internal(
+                store,
+                &id,
+                &rel_paths,
+                proxy_url.as_deref(),
+                None,
+                None,
+            )
+            .map_err(map_app_err)?;
+            print_json(&result, json);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Serialize, Default)]
+struct BatchAddReport {
+    added: Vec<BatchAdded>,
+    failed: Vec<BatchAddFailure>,
+}
+
+#[derive(Serialize)]
+struct BatchAdded {
+    location: String,
+    id: String,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct BatchAddFailure {
+    location: String,
+    error: String,
+}
+
+/// Add each location in turn; one that fails does not stop the rest.
+fn add_marketplaces(
+    store: &SkillStore,
+    locations: &[String],
+    proxy_url: Option<&str>,
+) -> BatchAddReport {
+    let mut report = BatchAddReport::default();
+    let mut seen = std::collections::HashSet::new();
+    for location in locations {
+        let location = location.trim();
+        if location.is_empty() || !seen.insert(location.to_string()) {
+            continue;
+        }
+        match market_cmd::add_marketplace_internal(store, location, None, proxy_url, None, None) {
+            Ok(detail) => report.added.push(BatchAdded {
+                location: location.to_string(),
+                id: detail.marketplace.id,
+                name: detail.marketplace.name,
+            }),
+            Err(error) => report.failed.push(BatchAddFailure {
+                location: location.to_string(),
+                error: error.message,
+            }),
+        }
+    }
+    report
+}
+
+#[derive(Serialize, Default)]
+struct ClaudeImportReport {
+    added: Vec<String>,
+    /// With --dry-run: what a real run would add.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    would_add: Vec<String>,
+    skipped: Vec<ClaudeImportNote>,
+    failed: Vec<ClaudeImportNote>,
+}
+
+#[derive(Serialize)]
+struct ClaudeImportNote {
+    name: String,
+    reason: String,
+}
+
+fn import_claude_marketplaces(
+    store: &SkillStore,
+    names: &[String],
+    dry_run: bool,
+    proxy_url: Option<&str>,
+) -> anyhow::Result<ClaudeImportReport> {
+    let found = market_cmd::claude_code_marketplaces_internal(store).map_err(map_app_err)?;
+    for name in names {
+        if !found.marketplaces.iter().any(|m| &m.name == name) {
+            bail!("Claude Code has no marketplace named '{name}'");
+        }
+    }
+    let mut report = ClaudeImportReport::default();
+    for candidate in found.marketplaces {
+        if !names.is_empty() && !names.contains(&candidate.name) {
+            continue;
+        }
+        let note = |reason: String| ClaudeImportNote {
+            name: candidate.name.clone(),
+            reason,
+        };
+        if let Some(existing) = &candidate.existing_name {
+            report.skipped.push(note(format!("already added as '{existing}'")));
+            continue;
+        }
+        let (Some(location), None) = (&candidate.location, &candidate.unsupported) else {
+            let reason = candidate.unsupported.clone().unwrap_or_default();
+            report.skipped.push(note(format!("cannot be added: {reason}")));
+            continue;
+        };
+        if dry_run {
+            report.would_add.push(candidate.name.clone());
+            continue;
+        }
+        match market_cmd::add_marketplace_internal(
+            store,
+            location,
+            Some(&candidate.name),
+            proxy_url,
+            None,
+            None,
+        ) {
+            Ok(_) => report.added.push(candidate.name.clone()),
+            Err(error) => report.failed.push(note(error.message)),
+        }
+    }
+    Ok(report)
+}
+
+fn marketplace_install_all(
+    detail: &market_cmd::MarketplaceDetailDto,
+    plugin: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    if let Some(plugin) = plugin {
+        if !detail.plugins.iter().any(|p| p.name.eq_ignore_ascii_case(plugin)) {
+            bail!("No plugin named '{plugin}' in this marketplace");
+        }
+    }
+    Ok(detail
+        .plugins
+        .iter()
+        .filter(|p| plugin.map_or(true, |wanted| p.name.eq_ignore_ascii_case(wanted)))
+        .flat_map(|p| p.skills.iter())
+        .filter(|skill| skill.installed_skill_id.is_none())
+        .map(|skill| skill.rel_path.clone())
+        .collect())
+}
+
+/// A skill as the user named it: its path, or its name when only one skill
+/// in the marketplace has it.
+fn marketplace_skill_path(
+    detail: &market_cmd::MarketplaceDetailDto,
+    wanted: &str,
+) -> anyhow::Result<String> {
+    let skills = || detail.plugins.iter().flat_map(|p| p.skills.iter());
+    if let Some(skill) = skills().find(|skill| skill.rel_path == wanted) {
+        return Ok(skill.rel_path.clone());
+    }
+    let by_name: Vec<_> = skills()
+        .filter(|skill| skill.name.eq_ignore_ascii_case(wanted))
+        .collect();
+    match by_name.as_slice() {
+        [skill] => Ok(skill.rel_path.clone()),
+        [] => bail!("No skill named '{wanted}' in this marketplace"),
+        several => bail!(
+            "'{wanted}' names several skills; pass one of their paths: {}",
+            several
+                .iter()
+                .map(|skill| skill.rel_path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 // ── search ────────────────────────────────────────────────────────────────
