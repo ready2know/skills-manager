@@ -428,6 +428,118 @@ export const importExistingSkill = (sourcePath: string, name?: string) =>
 export const importAllDiscovered = () =>
   invoke<void>("import_all_discovered");
 
+// ── Marketplaces ──
+
+export type MarketplaceKind = "local" | "remote";
+export type MarketplaceFormat = "claude_plugins" | "skill_folders";
+
+export interface Marketplace {
+  id: string;
+  name: string;
+  kind: MarketplaceKind;
+  /** The folder path, or the URL as entered. */
+  location: string;
+  clone_url: string | null;
+  branch: string | null;
+  subpath: string | null;
+  web_url: string | null;
+  format: MarketplaceFormat | null;
+  description: string | null;
+  owner: string | null;
+  revision: string | null;
+  last_synced_at: number | null;
+  last_error: string | null;
+  plugin_count: number;
+  skill_count: number;
+  installed_count: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface MarketplaceExternalSource {
+  kind: string;
+  url: string | null;
+}
+
+export interface MarketplaceSkill {
+  rel_path: string;
+  name: string;
+  description: string | null;
+  installed_skill_id: string | null;
+  installed_name: string | null;
+  update_status: string | null;
+}
+
+export interface MarketplacePlugin {
+  /** Empty for the single group of a repository without a plugin manifest. */
+  name: string;
+  description: string | null;
+  version: string | null;
+  category: string | null;
+  external: MarketplaceExternalSource | null;
+  skills: MarketplaceSkill[];
+}
+
+export interface MarketplaceDetail {
+  marketplace: Marketplace;
+  plugins: MarketplacePlugin[];
+  warnings: string[];
+}
+
+export interface MarketplaceInstallResult {
+  installed: string[];
+  skipped: string[];
+  failed: string[];
+}
+
+/** The `install-progress` / `cancelInstall` key of a marketplace operation:
+ *  its id once it exists, the location while it is being added. */
+export const marketplaceOperationKey = (idOrLocation: string) =>
+  `marketplace:${idOrLocation}`;
+
+export const listMarketplaces = () => invoke<Marketplace[]>("list_marketplaces");
+
+export const getMarketplace = (id: string) =>
+  invoke<MarketplaceDetail>("get_marketplace", { id });
+
+export const addMarketplace = (location: string, name?: string) =>
+  invoke<MarketplaceDetail>("add_marketplace", { location, name: name || null });
+
+export const refreshMarketplace = (id: string) =>
+  invoke<MarketplaceDetail>("refresh_marketplace", { id });
+
+export const renameMarketplace = (id: string, name: string) =>
+  invoke<Marketplace>("rename_marketplace", { id, name });
+
+export const removeMarketplace = (id: string) =>
+  invoke<void>("remove_marketplace", { id });
+
+export const installMarketplaceSkills = (id: string, relPaths: string[]) =>
+  invoke<MarketplaceInstallResult>("install_marketplace_skills", { id, relPaths });
+
+export const revealMarketplaceFolder = (id: string) =>
+  invoke<void>("reveal_marketplace_folder", { id });
+
+export interface ClaudeMarketplace {
+  /** Claude Code's name for it, used as the name here too. */
+  name: string;
+  kind: string;
+  /** What importing adds: a folder path or a repository URL. */
+  location: string | null;
+  /** Why it cannot be imported, when it cannot. */
+  unsupported: string | null;
+  /** The marketplace already registered here for the same location. */
+  existing_name: string | null;
+}
+
+export interface ClaudeMarketplaces {
+  config_dir: string | null;
+  marketplaces: ClaudeMarketplace[];
+}
+
+export const listClaudeCodeMarketplaces = () =>
+  invoke<ClaudeMarketplaces>("list_claude_code_marketplaces");
+
 // ── Browse ──
 
 export const fetchLeaderboard = (board: string) =>

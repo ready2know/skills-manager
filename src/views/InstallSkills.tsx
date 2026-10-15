@@ -22,6 +22,7 @@ import {
   MoreHorizontal,
   Pencil,
   Calendar,
+  Store,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -34,6 +35,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import { StatusBanner } from "../components/StatusBanner";
+import { MarketplacesPanel } from "../components/MarketplacesPanel";
 import { getErrorMessage, getErrorKind } from "../lib/error";
 
 const MARKET_PAGE_SIZE = 24;
@@ -44,13 +46,15 @@ const MARKET_SEARCH_CACHE_MAX_ENTRIES = 150;
 // skills.sh lists skills a website publishes itself under /site/<domain>/<skill>;
 // their source is the domain, not a GitHub owner/repo.
 const SKILLS_SH_SITE_REF = /\/site\/([^/]+)\/([^/?#]+)\/?$/;
+const INSTALL_TABS = ["market", "marketplaces", "local", "git"] as const;
+type InstallTab = (typeof INSTALL_TABS)[number];
 
 export function InstallSkills() {
   const { t } = useTranslation();
   const { refreshPresets, refreshManagedSkills, managedSkills, openSkillDetailById } = useApp();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [activeTab, setActiveTab] = useState<"market" | "local" | "git">("market");
+  const [activeTab, setActiveTab] = useState<InstallTab>("market");
   const [marketTab, setMarketTab] = useState<"hot" | "trending" | "alltime">("alltime");
   const [marketQuery, setMarketQuery] = useState("");
   const [marketSourceFilter, setMarketSourceFilter] = useState("all");
@@ -184,12 +188,12 @@ export function InstallSkills() {
 
   useEffect(() => {
     const tab = searchParams.get("tab");
-    if (tab === "market" || tab === "local" || tab === "git") {
-      setActiveTab(tab);
+    if (INSTALL_TABS.includes(tab as InstallTab)) {
+      setActiveTab(tab as InstallTab);
     }
   }, [searchParams]);
 
-  const switchTab = (tab: "market" | "local" | "git") => {
+  const switchTab = (tab: InstallTab) => {
     setActiveTab(tab);
     setSearchParams({ tab });
   };
@@ -468,10 +472,12 @@ export function InstallSkills() {
     });
   };
 
-  const handleGitPreview = async () => {
-    if (!gitUrl.trim()) return;
+  // `repoUrl` previews a repository named elsewhere — a marketplace plugin
+  // hosted outside its marketplace — instead of the URL typed into this tab.
+  const handleGitPreview = async (repoUrl?: string) => {
+    const url = (repoUrl ?? gitUrl).trim();
+    if (!url || gitLoading) return;
     setGitLoading(true);
-    const url = gitUrl.trim();
     setGitCancelKey(url);
 
     const toastId = toast.loading(t("install.toast.cloning"));
@@ -722,12 +728,23 @@ export function InstallSkills() {
   }, [sourceFocusedIndex]);
 
   return (
-    <div className="app-page gap-4">
+    <div
+      className={cn(
+        "app-page gap-4",
+        // Marketplaces is a two-pane view that fills the window, each pane
+        // scrolling on its own: the page takes exactly the height left to it
+        // instead of growing with its content. The basis is 0px, not
+        // flex-1's 0%: the layout around the page has no fixed height, and a
+        // percentage of that falls back to the content's own height.
+        activeTab === "marketplaces" && "lg:min-h-0 lg:flex-[1_1_0px] lg:pb-0"
+      )}
+    >
       <div className="app-page-header border-b-0 pb-0">
         <h1 className="app-page-title mb-4">{t("install.title")}</h1>
         <div className="flex gap-1 border-b border-border-subtle">
           {[
             { id: "market" as const, label: t("install.browseMarket"), icon: Box },
+            { id: "marketplaces" as const, label: t("install.marketplacesTab"), icon: Store },
             { id: "local" as const, label: t("install.localInstall"), icon: UploadCloud },
             { id: "git" as const, label: t("install.gitInstall"), icon: Github },
           ].map((tab) => {
@@ -1201,6 +1218,12 @@ export function InstallSkills() {
         </div>
       )}
 
+      {activeTab === "marketplaces" && (
+        <div className="animate-in fade-in flex min-h-0 flex-[1_1_0px] flex-col duration-300">
+          <MarketplacesPanel onBrowseRepository={(url) => handleGitPreview(url)} />
+        </div>
+      )}
+
       {activeTab === "local" && (
         <div className="space-y-4 pb-8 animate-in fade-in duration-300">
           <section className="app-panel overflow-hidden">
@@ -1499,7 +1522,7 @@ export function InstallSkills() {
                   </button>
                 ) : (
                   <button
-                    onClick={handleGitPreview}
+                    onClick={() => handleGitPreview()}
                     disabled={!gitUrl.trim()}
                     className={cn(
                       "flex w-full",
