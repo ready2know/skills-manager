@@ -100,6 +100,27 @@ pub struct ProjectRecord {
     pub updated_at: i64,
 }
 
+/// A registered marketplace. `kind` is `"local"` (a folder the user keeps,
+/// `location` is its path) or `"remote"` (a repository, `location` is the URL
+/// as entered and `clone_url`/`branch`/`subpath` what it resolved to).
+#[derive(Debug, Clone, Serialize)]
+pub struct MarketplaceRecord {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub location: String,
+    pub clone_url: Option<String>,
+    pub branch: Option<String>,
+    pub subpath: Option<String>,
+    /// The last successful scan, as JSON (`marketplace::Catalog`).
+    pub catalog: Option<String>,
+    pub revision: Option<String>,
+    pub last_synced_at: Option<i64>,
+    pub last_error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ScenarioSkillToolToggleRecord {
     pub scenario_id: String,
@@ -1223,6 +1244,96 @@ impl SkillStore {
         Ok(())
     }
 
+    // ── Marketplaces ──
+
+    pub fn insert_marketplace(&self, record: &MarketplaceRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO marketplaces (
+                id, name, kind, location, clone_url, branch, subpath, catalog, revision,
+                last_synced_at, last_error, created_at, updated_at
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                record.id,
+                record.name,
+                record.kind,
+                record.location,
+                record.clone_url,
+                record.branch,
+                record.subpath,
+                record.catalog,
+                record.revision,
+                record.last_synced_at,
+                record.last_error,
+                record.created_at,
+                record.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_all_marketplaces(&self) -> Result<Vec<MarketplaceRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {MARKETPLACE_COLUMNS} FROM marketplaces ORDER BY created_at, name"
+        ))?;
+        let rows = stmt.query_map([], map_marketplace_row)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn get_marketplace_by_id(&self, id: &str) -> Result<Option<MarketplaceRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {MARKETPLACE_COLUMNS} FROM marketplaces WHERE id = ?1"
+        ))?;
+        let mut rows = stmt.query_map(params![id], map_marketplace_row)?;
+        Ok(rows.next().and_then(|r| r.ok()))
+    }
+
+    /// Record a successful scan. Clears any error the previous attempt left.
+    pub fn update_marketplace_catalog(
+        &self,
+        id: &str,
+        catalog: &str,
+        revision: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        conn.execute(
+            "UPDATE marketplaces
+             SET catalog = ?2, revision = ?3, last_synced_at = ?4, last_error = NULL, updated_at = ?4
+             WHERE id = ?1",
+            params![id, catalog, revision, now],
+        )?;
+        Ok(())
+    }
+
+    /// Record a failed scan, keeping the last good catalog browsable.
+    pub fn update_marketplace_error(&self, id: &str, error: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE marketplaces SET last_error = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, error, chrono::Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn rename_marketplace(&self, id: &str, name: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE marketplaces SET name = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, name, chrono::Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_marketplace(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM marketplaces WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     // ── Skill Tags ──
 
     pub fn get_all_tags(&self) -> Result<Vec<String>> {
@@ -1505,6 +1616,27 @@ mod scenario_membership_tests {
             .unwrap()
             .is_empty());
     }
+}
+
+const MARKETPLACE_COLUMNS: &str = "id, name, kind, location, clone_url, branch, subpath, catalog, \
+     revision, last_synced_at, last_error, created_at, updated_at";
+
+fn map_marketplace_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MarketplaceRecord> {
+    Ok(MarketplaceRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        kind: row.get(2)?,
+        location: row.get(3)?,
+        clone_url: row.get(4)?,
+        branch: row.get(5)?,
+        subpath: row.get(6)?,
+        catalog: row.get(7)?,
+        revision: row.get(8)?,
+        last_synced_at: row.get(9)?,
+        last_error: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
 }
 
 fn map_skill_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SkillRecord> {

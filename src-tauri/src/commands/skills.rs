@@ -793,7 +793,7 @@ pub fn delete_managed_skills_by_ids(
 
 /// Append an audit log entry summarising an install attempt.
 /// `source_label` is short text identifying the source (e.g. "local", "git", "skillssh").
-fn log_install_outcome(
+pub(crate) fn log_install_outcome(
     store: &SkillStore,
     source_label: &str,
     outcome: Result<&(String, String), &AppError>,

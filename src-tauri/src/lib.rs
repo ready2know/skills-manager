@@ -1048,6 +1048,16 @@ pub fn run() {
             commands::scan::scan_local_skills,
             commands::scan::import_existing_skill,
             commands::scan::import_all_discovered,
+            // Marketplaces
+            commands::marketplaces::list_marketplaces,
+            commands::marketplaces::get_marketplace,
+            commands::marketplaces::add_marketplace,
+            commands::marketplaces::refresh_marketplace,
+            commands::marketplaces::rename_marketplace,
+            commands::marketplaces::remove_marketplace,
+            commands::marketplaces::install_marketplace_skills,
+            commands::marketplaces::reveal_marketplace_folder,
+            commands::marketplaces::list_claude_code_marketplaces,
             // Browse
             commands::browse::fetch_leaderboard,
             commands::browse::search_skillssh,
